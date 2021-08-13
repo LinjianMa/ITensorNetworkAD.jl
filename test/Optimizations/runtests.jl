@@ -35,13 +35,14 @@ end
 
 @testset "test the loss of optimization" begin
   Nx, Ny = 3, 3
-  num_sweeps = 20
+  num_sweeps = 10
   cutoff = 1e-15
   maxdim = 100
   sites = siteinds("S=1/2", Ny, Nx)
   peps = PEPS(sites; linkdims=2)
   randn!(peps)
   H_line = Models.lineham(Models.Model("tfim"), sites; h=1.0)
+  @time begin
   losses_gd = gradient_descent(
     peps,
     H_line,
@@ -51,6 +52,7 @@ end
     cutoff=cutoff,
     maxdim=maxdim,
   )
+  end
   for i in 3:(length(losses_gd) - 1)
     @test losses_gd[i] >= losses_gd[i + 1]
   end

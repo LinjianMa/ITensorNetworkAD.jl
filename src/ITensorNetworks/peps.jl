@@ -311,16 +311,33 @@ function insert_projectors(peps::PEPS, cutoff=1e-15, maxdim=100)
   bonds_column = [(:, i) for i in 1:Nx]
   tn_split_row, tn_split_column = [], []
   projectors_row, projectors_column = Vector{Vector{ITensor}}(), Vector{Vector{ITensor}}()
-  for bond in bonds_row
-    tn_split, pl, pr = insert_projectors(tn, bmps; center=bond)
-    push!(tn_split_row, tn_split)
+  # Note: this is hacky
+  _, pl1, pr1 = insert_projectors(tn, bmps; center=[1, :])
+  _, pl2, pr2 = insert_projectors(tn, bmps; center=[Ny, :])
+  for i in 1:Ny
+    pl = vcat(pl1[i:end], pl2[1:i-1])
+    pr = vcat(pr1[i:end], pr2[1:i-1])
     push!(projectors_row, vcat(reduce(vcat, pl), reduce(vcat, pr)))
   end
-  for bond in bonds_column
-    tn_split, pl, pr = insert_projectors(tn_rot, bmps_rot; center=bond)
-    push!(tn_split_column, tn_split)
+  _, pl1, pr1 = insert_projectors(tn, bmps; center=[:, 1])
+  _, pl2, pr2 = insert_projectors(tn, bmps; center=[:, Nx])
+  for i in 1:Nx
+    pl = vcat(pl1[i:end], pl2[1:i-1])
+    pr = vcat(pr1[i:end], pr2[1:i-1])
     push!(projectors_column, vcat(reduce(vcat, pl), reduce(vcat, pr)))
   end
+  # for bond in bonds_row
+  #   tn_split, pl, pr = insert_projectors(tn, bmps; center=bond)
+  #   print(size(pl), size(pr))
+  #   print("size of pl and pr \n")
+  #   push!(tn_split_row, tn_split)
+  #   push!(projectors_row, vcat(reduce(vcat, pl), reduce(vcat, pr)))
+  # end
+  # for bond in bonds_column
+  #   tn_split, pl, pr = insert_projectors(tn_rot, bmps_rot; center=bond)
+  #   push!(tn_split_column, tn_split)
+  #   push!(projectors_column, vcat(reduce(vcat, pl), reduce(vcat, pr)))
+  # end
   return tn_split_row, tn_split_column, projectors_row, projectors_column
 end
 

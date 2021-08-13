@@ -114,7 +114,18 @@ end
 
 function generate_einsum_expr(trees::Vector{SubNetwork}; optimize=false)
   node_dict = Dict()
-  outnodes = [generate_einsum_expr!(tree, node_dict; optimize=optimize) for tree in trees]
+  outnodes = [generate_einsum_expr!(tree, node_dict; optimize=false) for tree in trees]
+  for n in outnodes
+    print(n)
+    print("\n")
+  end
+  print("before dedup: ")
+  print(length(ad.find_topo_sort(outnodes)))
+  print("\n")
+  go.dedup(outnodes...)
+  print("after dedup: ")
+  print(length(ad.find_topo_sort(outnodes)))
+  print("\n")
   return outnodes, node_dict
 end
 
