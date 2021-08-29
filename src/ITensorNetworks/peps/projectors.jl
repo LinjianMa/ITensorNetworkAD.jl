@@ -1,4 +1,6 @@
 using .Models
+using ..ITensorAutoHOOT
+using ..ITensorAutoHOOT: SubNetwork, neighboring_tensors
 
 function insert_projectors(peps::PEPS, cutoff=1e-15, maxdim=100)
   psi_bra = addtags(linkinds, dag.(peps.data), "bra")

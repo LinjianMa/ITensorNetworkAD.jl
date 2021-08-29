@@ -1,3 +1,12 @@
+function general_mps_MPSTensor(tensor::ITensor; cutoff, maxdim)
+  mps_out = if size(tensor) == ()
+    MPS([tensor])
+  else
+    MPS(tensor, inds(tensor); cutoff=cutoff, maxdim=maxdim)
+  end
+  return MPSTensor(mps_out)
+end
+
 function general_mps_contract(mps1::MPS, mps2::MPS; cutoff, maxdim)
   ## TODO
   tensor = contract(vcat(collect(mps1), collect(mps2))...)
