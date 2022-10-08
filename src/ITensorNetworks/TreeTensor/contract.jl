@@ -4,13 +4,17 @@ ITensors.enable_contraction_sequence_optimization()
 @profile myeigen(tnormal, linds, rinds; kwargs...) = eigen(tnormal, linds, rinds; kwargs...)
 
 @profile function optcontract(t_list::Vector)
+  # TODO: make this support orthotensor
   if length(t_list) == 0
     return ITensor(1.0)
   end
+  @assert t_list isa Vector{OrthogonalITensor}
+  t_list = get_tensors(t_list)
   # for t in t_list
   #   @info "size of t is", size(t)
   # end
-  return contract(generate_optimal_tree(t_list))
+  output = contract(generate_optimal_tree(t_list))
+  return OrthogonalITensor(output)
 end
 
 # contract into one ITensor
@@ -44,8 +48,15 @@ end
 
 approximate_contract(tn::ITensor, inds_groups; kwargs...) = [tn]
 
+approximate_contract(tn::OrthogonalITensor, inds_groups; kwargs...) = [tn]
+
+function approximate_contract(tn::Vector{ITensor}, inds_btree=nothing; kwargs...)
+  out = approximate_contract(orthogonal_tensors(tn), inds_btree; kwargs...)
+  return get_tensors(out)
+end
+
 function approximate_contract(
-  tn::Vector{ITensor},
+  tn::Vector{OrthogonalITensor},
   inds_btree=nothing;
   cutoff,
   maxdim,
@@ -69,11 +80,11 @@ function approximate_contract(
   #   tn = Vector{ITensor}(vcat(deltas, tnprime))
   # end
   if inds_btree == nothing
-    inds_btree = inds_binary_tree(tn, nothing; algorithm=algorithm)
+    inds_btree = inds_binary_tree(get_tensors(tn), nothing; algorithm=algorithm)
   end
   # tree_approximation(tn, inds_btree; cutoff=cutoff, maxdim=maxdim)
   embedding = tree_embedding(tn, inds_btree)
-  tn = Vector{ITensor}(vcat(collect(values(embedding))...))
+  tn = Vector{OrthogonalITensor}(vcat(collect(values(embedding))...))
   i2 = noncommoninds(tn...)
   @assert (length(uncontract_inds) == length(i2))
   tree = tree_approximation_cache(
@@ -535,9 +546,9 @@ function approximate_contract(ctree::Vector; kwargs...)
     tn_leaves, ctrees
   )
   # mapping each contraction tree to a tensor network
-  ctree_to_tn = Dict{Vector,Vector{ITensor}}()
+  ctree_to_tn = Dict{Vector,Vector{OrthogonalITensor}}()
   for leaf in tn_leaves
-    ctree_to_tn[leaf] = leaf
+    ctree_to_tn[leaf] = orthogonal_tensors(leaf)
   end
   for c in ctrees
     tn = vcat(ctree_to_tn[c[1]], ctree_to_tn[c[2]])
@@ -546,17 +557,18 @@ function approximate_contract(ctree::Vector; kwargs...)
       continue
     end
     ordered_igs = ctree_to_adj_tree[c].children
+    # TODO: change center
     inds_btree = line_to_tree([ig_to_ig_tree[ig].data for ig in ordered_igs])
     ctree_to_tn[c] = approximate_contract(tn, inds_btree; kwargs...)
   end
-  return ctree_to_tn[ctrees[end]]
+  return get_tensors(ctree_to_tn[ctrees[end]])
 end
 
 # interlaced HOSVD using caching
 @profile function tree_approximation_cache(
   embedding::Dict, inds_btree::Vector; cutoff=1e-15, maxdim=10000, maxsize=10000
 )
-  projectors = []
+  projectors = Vector{OrthogonalITensor}()
   # initialize sim_dict
   network = vcat(collect(values(embedding))...)
   uncontractinds = noncommoninds(network...)
@@ -574,7 +586,7 @@ end
     return optcontract(vcat(netbra, netket, [tleft], [tright]))
   end
 
-  function insert_projectors(tree::Vector, env::ITensor)
+  function insert_projectors(tree::Vector, env::OrthogonalITensor)
     netbra = embedding[tree]
     netket = replaceinds(netbra, siminner_dict)
     if length(tree) == 1
@@ -601,11 +613,15 @@ end
     tnormal = optcontract(net)
     dim2 = floor(maxsize / (space(ind1_pair[1]) * space(ind2_pair[1])))
     dim = min(maxdim, dim2)
-    diag, U = myeigen(tnormal, linds, rinds; cutoff=cutoff, maxdim=dim, ishermitian=true)
+    diag, U = myeigen(
+      tnormal.tensor, linds, rinds; cutoff=cutoff, maxdim=dim, ishermitian=true
+    )
     dr = commonind(diag, U)
     Usim = replaceinds(U, rinds => linds)
-    net1 = [netbra..., subnet1[1], subnet2[1], U]
-    net2 = [netket..., subnet1[2], subnet2[2], Usim]
+    ortho_U = OrthogonalITensor(U)
+    ortho_Usim = OrthogonalITensor(Usim)
+    net1 = [netbra..., subnet1[1], subnet2[1], ortho_U]
+    net2 = [netket..., subnet1[2], subnet2[2], ortho_Usim]
     tensor1 = optcontract(net1)
     tensor2 = replaceinds(tensor1, noncommoninds(net1...) => noncommoninds(net2...))
     subnetsq = optcontract([tensor1, tensor2])
@@ -613,7 +629,7 @@ end
     tensor2 = replaceinds(tensor2, [dr_pair[1]] => [dr_pair[2]])
     subnet = [tensor1, tensor2]
     # add the projector to the list projectors
-    projectors = vcat(projectors, [U])
+    projectors = vcat(projectors, [ortho_U])
     return dr_pair, subnetsq, subnet
   end
 

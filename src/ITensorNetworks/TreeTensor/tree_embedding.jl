@@ -1,6 +1,28 @@
 include("union_find.jl")
 
-@profile function tree_embedding(network::Vector{ITensor}, inds_btree::Vector)
+function tree_embedding(network::Vector{OrthogonalITensor}, inds_btree::Vector)
+  # TODO: consider identity matrices
+  tensor_to_ortho_tensor = Dict{ITensor,OrthogonalITensor}()
+  for ortho_tensor in network
+    tensor_to_ortho_tensor[ortho_tensor.tensor] = ortho_tensor
+  end
+  tnets_dict = tree_embedding(get_tensors(network), inds_btree)
+  ortho_tnets_dict = Dict()
+  for (key, tensors) in tnets_dict
+    ortho_tensors = Vector{OrthogonalITensor}()
+    for t in tensors
+      if haskey(tensor_to_ortho_tensor, t)
+        push!(ortho_tensors, tensor_to_ortho_tensor[t])
+      else
+        push!(ortho_tensors, OrthogonalITensor(t))
+      end
+    end
+    ortho_tnets_dict[key] = ortho_tensors
+  end
+  return ortho_tnets_dict
+end
+
+function tree_embedding(network::Vector{ITensor}, inds_btree::Vector)
   deltas, networkprime, _ = split_deltas(noncommoninds(network...), network)
   network = vcat(deltas, networkprime)
   # tnets_dict map each inds_btree node to a tensor network

@@ -218,7 +218,9 @@ function ITensors.prime(indices::Array{<:Index,1}, network::Array{ITensor}, n::I
   return map(x -> primeinds(x), network)
 end
 
-function ITensors.replaceinds(network::Array{ITensor}, sim_dict::Dict)
+function ITensors.replaceinds(
+  network::Union{Array{ITensor},Array{OrthogonalITensor}}, sim_dict::Dict
+)
   if length(network) == 0
     return network
   end
