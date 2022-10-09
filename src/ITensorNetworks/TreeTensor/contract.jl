@@ -55,7 +55,12 @@ function approximate_contract(tn::Vector{ITensor}, inds_btree=nothing; kwargs...
   return get_tensors(out)
 end
 
-function approximate_contract(
+function approximate_contract(tn::Vector{OrthogonalITensor}, inds_btree=nothing; kwargs...)
+  ctree_to_tensor = approximate_contract_ctree_to_tensor(tn, inds_btree; kwargs...)
+  return Vector{OrthogonalITensor}(vcat(collect(values(ctree_to_tensor))...))
+end
+
+function approximate_contract_ctree_to_tensor(
   tn::Vector{OrthogonalITensor},
   inds_btree=nothing;
   cutoff,
@@ -67,12 +72,13 @@ function approximate_contract(
   allinds = collect(Set(mapreduce(t -> collect(inds(t)), vcat, tn)))
   innerinds = setdiff(allinds, uncontract_inds)
   if length(uncontract_inds) <= 2
-    return [optcontract(tn)]
+    return Dict{Vector,OrthogonalITensor}([uncontract_inds] => optcontract(tn))
   end
-  # cases where tn is a tree, or contains 2 disconnected trees
-  if length(innerinds) <= length(tn) - 1
-    return tn
-  end
+  # # cases where tn is a tree, or contains 2 disconnected trees
+  # if length(innerinds) <= length(tn) - 1
+  #   # TODO
+  #   return tn
+  # end
   # # TODO: may want to remove this
   # if inds_groups != nothing
   #   deltainds = vcat(filter(g -> length(g) > 1, inds_groups)...)
@@ -87,10 +93,9 @@ function approximate_contract(
   tn = Vector{OrthogonalITensor}(vcat(collect(values(embedding))...))
   i2 = noncommoninds(tn...)
   @assert (length(uncontract_inds) == length(i2))
-  tree = tree_approximation_cache(
+  return tree_approximation_cache(
     embedding, inds_btree; cutoff=cutoff, maxdim=maxdim, maxsize=maxsize
   )
-  return tree
 end
 
 function uncontractinds(tn)
@@ -480,17 +485,62 @@ end
   input_tree1::IndexAdjacencyTree,
   input_tree2::IndexAdjacencyTree,
 )
+  function split(leaves, inter_igs)
+    leaves_left = []
+    leaves_right = []
+    target_array = leaves_left
+    for i in leaves
+      if i in inter_igs
+        target_array = leaves_right
+        continue
+      end
+      push!(target_array, i)
+    end
+    return leaves_left, leaves_right
+  end
+  function merge(l1_left, l1_right, l2_left, l2_right)
+    if length(l1_left) < length(l2_left)
+      left_lists = [[l2_left..., l1_left...]]
+    elseif length(l1_left) > length(l2_left)
+      left_lists = [[l1_left..., l2_left...]]
+    else
+      left_lists = [[l2_left..., l1_left...], [l1_left..., l2_left...]]
+    end
+    if length(l1_right) < length(l2_right)
+      right_lists = [[l1_right..., l2_right...]]
+    elseif length(l1_right) > length(l2_right)
+      right_lists = [[l2_right..., l1_right...]]
+    else
+      right_lists = [[l2_right..., l1_right...], [l1_right..., l2_right...]]
+    end
+    out_lists = []
+    for l in left_lists
+      for r in right_lists
+        push!(out_lists, IndexAdjacencyTree([l..., r...], true, true))
+      end
+    end
+    return out_lists
+  end
   leaves_1 = get_adj_tree_leaves(input_tree1)
   leaves_2 = get_adj_tree_leaves(input_tree2)
   inter_igs = intersect(leaves_1, leaves_2)
-  leaves_1 = [i for i in leaves_1 if !(i in inter_igs)]
-  leaves_2 = [i for i in leaves_2 if !(i in inter_igs)]
-  input1 = IndexAdjacencyTree([leaves_1..., leaves_2...], true, true)
-  input2 = IndexAdjacencyTree([leaves_1..., reverse(leaves_2)...], true, true)
-  input3 = IndexAdjacencyTree([reverse(leaves_1)..., leaves_2...], true, true)
-  input4 = IndexAdjacencyTree([reverse(leaves_1)..., reverse(leaves_2)...], true, true)
-  inputs = [input1, input2, input3, input4]
-  adj_tree_copies = [copy(adj_tree) for _ in 1:4]
+  leaves_1_left, leaves_1_right = split(leaves_1, inter_igs)
+  leaves_2_left, leaves_2_right = split(leaves_2, inter_igs)
+  inputs_1 = merge(leaves_1_left, leaves_1_right, leaves_2_left, leaves_2_right)
+  inputs_2 = merge(
+    leaves_1_left, leaves_1_right, reverse(leaves_2_right), reverse(leaves_2_left)
+  )
+  inputs = [inputs_1..., inputs_2...]
+  # TODO: may want to change this back
+  # leaves_1 = [i for i in leaves_1 if !(i in inter_igs)]
+  # leaves_2 = [i for i in leaves_2 if !(i in inter_igs)]
+  # input1 = IndexAdjacencyTree([leaves_1..., leaves_2...], true, true)
+  # input2 = IndexAdjacencyTree([leaves_1..., reverse(leaves_2)...], true, true)
+  # input3 = IndexAdjacencyTree([reverse(leaves_1)..., leaves_2...], true, true)
+  # input4 = IndexAdjacencyTree([reverse(leaves_1)..., reverse(leaves_2)...], true, true)
+  # inputs = [input1, input2, input3, input4]
+  # ======================================
+  adj_tree_copies = [copy(adj_tree) for _ in 1:length(inputs)]
   nswaps = [minswap_adjacency_tree!(t, i) for (t, i) in zip(adj_tree_copies, inputs)]
   return adj_tree_copies[argmin(nswaps)]
 end
@@ -536,39 +586,48 @@ end
 
 # ctree: contraction tree
 # tn: vector of tensors representing a tensor network
+# tn_tree: a dict maps each index tree in the tn to a tensor
 # adj_tree: index adjacency tree
 # ig: index group
 # ig_tree: an index group with a tree hierarchy 
 function approximate_contract(ctree::Vector; kwargs...)
   tn_leaves = get_leaves(ctree)
   ctrees = topo_sort(ctree; leaves=tn_leaves)
+  # TODO: update this function: add ctree_to_positions
   ctree_to_igs, ctree_to_adj_tree, ig_to_ig_tree = _approximate_contract_pre_process(
     tn_leaves, ctrees
   )
   # mapping each contraction tree to a tensor network
-  ctree_to_tn = Dict{Vector,Vector{OrthogonalITensor}}()
+  ctree_to_tn_tree = Dict{Vector,Dict{Vector,OrthogonalITensor}}()
   for leaf in tn_leaves
-    ctree_to_tn[leaf] = orthogonal_tensors(leaf)
+    ordered_igs = ctree_to_adj_tree[leaf].children
+    inds_btree = line_to_tree([ig_to_ig_tree[ig].data for ig in ordered_igs])
+    ctree_to_tn_tree[leaf] = approximate_contract_ctree_to_tensor(
+      orthogonal_tensors(leaf), inds_btree; kwargs...
+    )
   end
   for c in ctrees
-    tn = vcat(ctree_to_tn[c[1]], ctree_to_tn[c[2]])
+    tn1 = vcat(collect(values(ctree_to_tn_tree[c[1]]))...)
+    tn2 = vcat(collect(values(ctree_to_tn_tree[c[2]]))...)
+    tn = vcat(tn1, tn2)
     if ctree_to_igs[c] == []
-      ctree_to_tn[c] = [optcontract(tn)]
-      continue
+      @assert c == ctrees[end]
+      return get_tensors([optcontract(tn)])
     end
     ordered_igs = ctree_to_adj_tree[c].children
-    # TODO: change center
+    # TODO: additional information: center, center of two inputs, ordering of two inputs
     inds_btree = line_to_tree([ig_to_ig_tree[ig].data for ig in ordered_igs])
-    ctree_to_tn[c] = approximate_contract(tn, inds_btree; kwargs...)
+    ctree_to_tn_tree[c] = approximate_contract_ctree_to_tensor(tn, inds_btree; kwargs...)
   end
-  return get_tensors(ctree_to_tn[ctrees[end]])
+  tn = vcat(collect(values(ctree_to_tn_tree[ctrees[end]]))...)
+  return get_tensors(tn)
 end
 
 # interlaced HOSVD using caching
 @profile function tree_approximation_cache(
   embedding::Dict, inds_btree::Vector; cutoff=1e-15, maxdim=10000, maxsize=10000
 )
-  projectors = Vector{OrthogonalITensor}()
+  ctree_to_tensor = Dict{Vector,OrthogonalITensor}()
   # initialize sim_dict
   network = vcat(collect(values(embedding))...)
   uncontractinds = noncommoninds(network...)
@@ -628,8 +687,7 @@ end
     dr_pair = (dr, sim(dr))
     tensor2 = replaceinds(tensor2, [dr_pair[1]] => [dr_pair[2]])
     subnet = [tensor1, tensor2]
-    # add the projector to the list projectors
-    projectors = vcat(projectors, [ortho_U])
+    ctree_to_tensor[tree] = ortho_U
     return dr_pair, subnetsq, subnet
   end
 
@@ -644,5 +702,6 @@ end
   # last tensor
   envnet = [n1[1], n2[1], bra...]
   last_tensor = optcontract(envnet)
-  return vcat(projectors, [last_tensor])
+  ctree_to_tensor[inds_btree] = last_tensor
+  return ctree_to_tensor
 end
