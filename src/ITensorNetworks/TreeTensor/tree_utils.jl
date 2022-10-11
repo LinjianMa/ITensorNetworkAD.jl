@@ -71,6 +71,9 @@ end
 end
 
 @profile function line_to_tree(line::Vector)
+  if length(line) == 1 && line[1] isa Vector
+    return line[1]
+  end
   if length(line) <= 2
     return line
   end
