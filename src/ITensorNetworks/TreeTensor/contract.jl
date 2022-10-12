@@ -72,7 +72,10 @@ function approximate_contract_ctree_to_tensor(
   allinds = collect(Set(mapreduce(t -> collect(inds(t)), vcat, tn)))
   innerinds = setdiff(allinds, uncontract_inds)
   if length(uncontract_inds) <= 2
-    return Dict{Vector,OrthogonalITensor}([uncontract_inds] => optcontract(tn))
+    if inds_btree == nothing
+      inds_btree = [[i] for i in uncontract_inds]
+    end
+    return Dict{Vector,OrthogonalITensor}(inds_btree => optcontract(tn))
   end
   # # cases where tn is a tree, or contains 2 disconnected trees
   # if length(innerinds) <= length(tn) - 1
@@ -480,9 +483,9 @@ function minswap_adjacency_tree!(
   return _insertion_sort(int_order, 1, length(int_order))
 end
 
-function split_igs(igs, inter_igs)
-  igs_left = []
-  igs_right = []
+function split_igs(igs::Vector{IndexGroup}, inter_igs::Vector{IndexGroup})
+  igs_left = Vector{IndexGroup}()
+  igs_right = Vector{IndexGroup}()
   target_array = igs_left
   for i in igs
     if i in inter_igs
@@ -493,6 +496,8 @@ function split_igs(igs, inter_igs)
   end
   return igs_left, igs_right
 end
+
+@profile mymerge(a, b) = merge(a, b)
 
 @profile function minswap_adjacency_tree(
   adj_tree::IndexAdjacencyTree,
@@ -527,11 +532,25 @@ end
   inter_igs = intersect(leaves_1, leaves_2)
   leaves_1_left, leaves_1_right = split_igs(leaves_1, inter_igs)
   leaves_2_left, leaves_2_right = split_igs(leaves_2, inter_igs)
-  inputs_1 = merge(leaves_1_left, leaves_1_right, leaves_2_left, leaves_2_right)
-  inputs_2 = merge(
-    leaves_1_left, leaves_1_right, reverse(leaves_2_right), reverse(leaves_2_left)
-  )
-  inputs = [inputs_1..., inputs_2...]
+  num_swaps_1 =
+    min(length(leaves_1_left), length(leaves_2_left)) +
+    min(length(leaves_1_right), length(leaves_2_right))
+  num_swaps_2 =
+    min(length(leaves_1_left), length(leaves_2_right)) +
+    min(length(leaves_1_right), length(leaves_2_left))
+  if num_swaps_1 == num_swaps_2
+    inputs_1 = merge(leaves_1_left, leaves_1_right, leaves_2_left, leaves_2_right)
+    inputs_2 = merge(
+      leaves_1_left, leaves_1_right, reverse(leaves_2_right), reverse(leaves_2_left)
+    )
+    inputs = [inputs_1..., inputs_2...]
+  elseif num_swaps_1 > num_swaps_2
+    inputs = merge(
+      leaves_1_left, leaves_1_right, reverse(leaves_2_right), reverse(leaves_2_left)
+    )
+  else
+    inputs = merge(leaves_1_left, leaves_1_right, leaves_2_left, leaves_2_right)
+  end
   # TODO: may want to change this back
   # leaves_1 = [i for i in leaves_1 if !(i in inter_igs)]
   # leaves_2 = [i for i in leaves_2 if !(i in inter_igs)]
@@ -585,7 +604,7 @@ end
   return ctree_to_igs, ctree_to_adj_tree, ig_to_ig_tree
 end
 
-function ordered_igs_to_binary_tree(ordered_igs, contract_igs, ig_to_ig_tree)
+@profile function ordered_igs_to_binary_tree(ordered_igs, contract_igs, ig_to_ig_tree)
   @assert contract_igs != []
   left_igs, right_igs = split_igs(ordered_igs, contract_igs)
   tree_1 = line_to_tree([ig_to_ig_tree[ig].data for ig in left_igs])
@@ -594,10 +613,10 @@ function ordered_igs_to_binary_tree(ordered_igs, contract_igs, ig_to_ig_tree)
   return merge_tree(merge_tree(tree_1, tree_contract), tree_2)
 end
 
-function get_igs_cache_info(igs_list, contract_igs_list)
+@profile function get_igs_cache_info(igs_list, contract_igs_list)
   function split_boundary(list1::Vector{IndexGroup}, list2::Vector{IndexGroup})
     index = 1
-    boundary = []
+    boundary = Vector{IndexGroup}()
     while list1[index] == list2[index]
       push!(boundary, list2[index])
       index += 1
@@ -608,20 +627,20 @@ function get_igs_cache_info(igs_list, contract_igs_list)
     if index <= length(list1)
       remain_list1 = list1[index:end]
     else
-      remain_list1 = []
+      remain_list1 = Vector{IndexGroup}()
     end
     return boundary, remain_list1
   end
-  function split_boundary(igs::Vector{IndexGroup}, lists::Vector{Vector})
-    if length(igs) == 0
-      return [], []
+  function split_boundary(igs::Vector{IndexGroup}, lists::Vector{Vector{IndexGroup}})
+    if length(igs) <= 1
+      return Vector{IndexGroup}(), igs
     end
     for l in lists
-      if length(l) > 0 && igs[1] == l[1]
-        return get_identical_boundary(igs, l)
+      if length(l) >= 2 && igs[1] == l[1] && igs[2] == l[2]
+        return split_boundary(igs, l)
       end
     end
-    return [], igs
+    return Vector{IndexGroup}(), igs
   end
   out, input1, input2 = igs_list
   contract_out, contract_input1, contract_input2 = contract_igs_list
@@ -632,29 +651,31 @@ function get_igs_cache_info(igs_list, contract_igs_list)
   inputs = [input1_left, reverse(input1_right), input2_left, reverse(input2_right)]
   boundary_left, remain_left = split_boundary(out_left, inputs)
   boundary_right, remain_right = split_boundary(out_right, inputs)
-  return [remain_left..., reverse(remain_right)...], boundary_left, boundary_right
+  return [remain_left..., contract_out..., reverse(remain_right)...],
+  boundary_left,
+  boundary_right
 end
 
-function get_tn_cache_info(
-  tn_tree::Dict{Vector,OrthogonalITensor}, cache_binary_trees::Vector{Vector}
+function get_tn_cache_sub_info(
+  tn_tree::Dict{Vector,OrthogonalITensor}, cache_binary_trees::Vector
 )
   cached_tn = []
   cached_tn_tree = Dict{Vector,OrthogonalITensor}()
   new_igs = []
   for binary_tree in cache_binary_trees
-    if haskey(tn_tree, cache_binary_tree_1)
-      nodes = topo_sort(cache_binary_tree_1; type=Vector{<:Vector})
+    if binary_tree == [] || !haskey(tn_tree, binary_tree)
+      push!(new_igs, nothing)
+    else
+      nodes = topo_sort(binary_tree; type=Vector{<:Vector})
       sub_tn = [tn_tree[n] for n in nodes]
       sub_tn_tree = Dict([n => tn_tree[n] for n in nodes]...)
-      index_leaves = vectorize(cache_binary_tree_1)
+      index_leaves = vectorize(binary_tree)
       new_indices = setdiff(noncommoninds(sub_tn...), index_leaves)
       @assert length(new_indices) == 1
       new_indices = Vector{<:Index}(new_indices)
       push!(new_igs, IndexGroup(new_indices))
       cached_tn = vcat(cached_tn, sub_tn)
-      cached_tn_tree = merge(cached_tn_tree, sub_tn_tree)
-    else
-      push!(new_igs, nothing)
+      cached_tn_tree = mymerge(cached_tn_tree, sub_tn_tree)
     end
   end
   tn = vcat(collect(values(tn_tree))...)
@@ -662,24 +683,36 @@ function get_tn_cache_info(
   return cached_tn_tree, uncached_tn, new_igs
 end
 
-function get_tn_cache_info(
+@profile function get_tn_cache_info(
   tn_tree_1::Dict{Vector,OrthogonalITensor},
   tn_tree_2::Dict{Vector,OrthogonalITensor},
-  cache_binary_trees::Vector{Vector},
+  cache_binary_trees::Vector,
 )
-  cached_tn_tree1, uncached_tn1, new_igs_1 = get_tn_cache_info(
+  cached_tn_tree1, uncached_tn1, new_igs_1 = get_tn_cache_sub_info(
     tn_tree_1, cache_binary_trees
   )
-  cached_tn_tree2, uncached_tn2, new_igs_2 = get_tn_cache_info(
-    tn_tree_1, cache_binary_trees
+  cached_tn_tree2, uncached_tn2, new_igs_2 = get_tn_cache_sub_info(
+    tn_tree_2, cache_binary_trees
   )
   uncached_tn = [uncached_tn1..., uncached_tn2...]
-  new_igs = [new_igs_1..., new_igs_2]
-  new_igs = [i for i in new_igs if i != nothing]
-  return merge(cached_tn_tree1, cached_tn_tree2), uncached_tn, new_igs[1], new_igs[2]
+  new_igs_left = [i for i in [new_igs_1[1], new_igs_2[1]] if i != nothing]
+  @assert length(new_igs_left) <= 1
+  if length(new_igs_left) == 1
+    new_ig_left = new_igs_left[1]
+  else
+    new_ig_left = nothing
+  end
+  new_igs_right = [i for i in [new_igs_1[2], new_igs_2[2]] if i != nothing]
+  @assert length(new_igs_right) <= 1
+  if length(new_igs_right) == 1
+    new_ig_right = new_igs_right[1]
+  else
+    new_ig_right = nothing
+  end
+  return mymerge(cached_tn_tree1, cached_tn_tree2), uncached_tn, new_ig_left, new_ig_right
 end
 
-function update_tn_tree_keys!(tn_tree, inds_btree, pairs::Vector{Pair})
+@profile function update_tn_tree_keys!(tn_tree, inds_btree, pairs::Vector{Pair})
   current_to_update_key = Dict{Vector,Vector}(pairs...)
   nodes = topo_sort(inds_btree; type=Vector{<:Vector})
   for n in nodes
@@ -749,24 +782,25 @@ function approximate_contract(ctree::Vector; kwargs...)
       ctree_to_tn_tree[c[2]],
       [cache_binary_tree_left, cache_binary_tree_right],
     )
-    new_ig_to_ig_tree = merge(
-      ig_to_ig_tree, Dict(new_ig_left => new_ig_left, new_ig_right => new_ig_right)
-    )
+    new_ig_to_binary_tree_pairs = Vector{Pair}()
+    new_igs = uncache_igs
+    new_ig_to_ig_tree = ig_to_ig_tree
+    if new_ig_left != nothing
+      new_ig_to_ig_tree = mymerge(new_ig_to_ig_tree, Dict(new_ig_left => new_ig_left))
+      new_igs = [new_ig_left, new_igs...]
+      push!(new_ig_to_binary_tree_pairs, new_ig_left.data => cache_binary_tree_left)
+    end
+    if new_ig_right != nothing
+      new_ig_to_ig_tree = mymerge(new_ig_to_ig_tree, Dict(new_ig_right => new_ig_right))
+      new_igs = [new_igs..., new_ig_right]
+      push!(new_ig_to_binary_tree_pairs, new_ig_right.data => cache_binary_tree_right)
+    end
     inds_btree = ordered_igs_to_binary_tree(
-      [new_ig_left, uncache_igs..., new_ig_right],
-      ctree_to_contract_igs[c],
-      new_ig_to_ig_tree,
+      new_igs, ctree_to_contract_igs[c], new_ig_to_ig_tree
     )
     new_tn_tree = approximate_contract_ctree_to_tensor(uncached_tn, inds_btree; kwargs...)
-    update_tn_tree_keys!(
-      new_tn_tree,
-      inds_btree,
-      [
-        new_ig_left.data => cache_binary_tree_left,
-        new_ig_right.data => cache_binary_tree_right,
-      ],
-    )
-    ctree_to_tn_tree[c] = merge(new_tn_tree, cached_tn_tree)
+    update_tn_tree_keys!(new_tn_tree, inds_btree, new_ig_to_binary_tree_pairs)
+    ctree_to_tn_tree[c] = mymerge(new_tn_tree, cached_tn_tree)
   end
   tn = vcat(collect(values(ctree_to_tn_tree[ctrees[end]]))...)
   return get_tensors(tn)
